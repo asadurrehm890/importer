@@ -79,6 +79,194 @@ export function metafieldsForRow(mapping, row) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Metafield value encoding
+// ---------------------------------------------------------------------------
+// Shopify validates a metafield's `value` against its definition type. Several
+// types are NOT plain strings — they require a JSON-encoded value:
+//   - rich_text_field : a rich-text document ({type:"root",children:[...]})
+//   - json            : any valid JSON
+//   - list.*          : a JSON array
+// CSV cells are plain strings/HTML, so we encode them to match the type here.
+
+const _entities = {
+  "&nbsp;": " ",
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&#39;": "'",
+  "&apos;": "'",
+};
+
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&nbsp;|&amp;|&lt;|&gt;|&quot;|&#39;|&apos;/g, (m) => _entities[m])
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
+}
+
+function stripTags(s) {
+  return String(s).replace(/<[^>]+>/g, "");
+}
+
+const richText = (value) => ({ type: "text", value });
+
+function richChildren(kids) {
+  return kids && kids.length ? kids : [richText("")];
+}
+
+function richParagraph(kids) {
+  return { type: "paragraph", children: richChildren(kids) };
+}
+
+/**
+ * Parse an inline HTML fragment into rich-text inline nodes, honoring
+ * <strong>/<b> (bold), <em>/<i> (italic) and <a href> (link). Unknown tags are
+ * stripped; entities are decoded.
+ */
+function parseRichInline(fragment) {
+  const out = [];
+  const re = /<(\/?)(strong|b|em|i|a)\b([^>]*)>|<br\s*\/?>/gi;
+  let pos = 0;
+  let bold = 0;
+  let italic = 0;
+  let link = null; // { type:"link", url, children:[] }
+
+  const push = (chunk) => {
+    const value = decodeEntities(stripTags(chunk));
+    if (!value) return;
+    const node = richText(value);
+    if (bold > 0) node.bold = true;
+    if (italic > 0) node.italic = true;
+    (link ? link.children : out).push(node);
+  };
+
+  let m;
+  while ((m = re.exec(fragment)) !== null) {
+    push(fragment.slice(pos, m.index));
+    pos = re.lastIndex;
+    if (/^<br/i.test(m[0])) {
+      push(" ");
+      continue;
+    }
+    const closing = m[1] === "/";
+    const tag = m[2].toLowerCase();
+    if (tag === "b" || tag === "strong") bold = Math.max(0, bold + (closing ? -1 : 1));
+    else if (tag === "i" || tag === "em") italic = Math.max(0, italic + (closing ? -1 : 1));
+    else if (tag === "a") {
+      if (closing) {
+        if (link && link.children.length) out.push(link);
+        link = null;
+      } else {
+        if (link && link.children.length) out.push(link);
+        const href = m[3].match(/href\s*=\s*"([^"]*)"|href\s*=\s*'([^']*)'/i);
+        const url = href ? href[1] ?? href[2] : "";
+        link = url ? { type: "link", url, children: [] } : null;
+      }
+    }
+  }
+  push(fragment.slice(pos));
+  if (link && link.children.length) out.push(link);
+  return out.length ? out : [richText("")];
+}
+
+function parseRichList(inner, listType) {
+  const items = [];
+  const liRe = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+  let m;
+  while ((m = liRe.exec(inner)) !== null) {
+    items.push({ type: "list-item", children: richChildren(parseRichInline(m[1])) });
+  }
+  if (!items.length) items.push({ type: "list-item", children: [richText("")] });
+  return { type: "list", listType, children: items };
+}
+
+// Split loose (non-block) HTML into paragraphs on <br> / blank lines.
+function pushLooseParagraphs(children, fragment) {
+  if (!fragment) return;
+  for (const part of fragment.split(/<br\s*\/?>|\n{2,}/i)) {
+    const inline = parseRichInline(part);
+    const onlyEmpty =
+      inline.length === 1 &&
+      inline[0].type === "text" &&
+      !inline[0].value.trim();
+    if (onlyEmpty) continue;
+    children.push(richParagraph(inline));
+  }
+}
+
+/**
+ * Convert an HTML (or plain-text) string into the JSON string Shopify expects
+ * for a `rich_text_field` metafield. Handles <p>, <h1>-<h6>, <ul>/<ol>/<li>,
+ * <br> and inline bold/italic/links; anything else degrades to plain text.
+ */
+export function htmlToRichText(raw) {
+  const html = raw == null ? "" : String(raw).trim();
+  const children = [];
+
+  const blockRe = /<(p|h[1-6]|ul|ol)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let lastIndex = 0;
+  let matched = false;
+  let m;
+  while ((m = blockRe.exec(html)) !== null) {
+    matched = true;
+    pushLooseParagraphs(children, html.slice(lastIndex, m.index));
+    const tag = m[1].toLowerCase();
+    const inner = m[2];
+    if (tag === "p") {
+      children.push(richParagraph(parseRichInline(inner)));
+    } else if (/^h[1-6]$/.test(tag)) {
+      children.push({
+        type: "heading",
+        level: Number(tag[1]),
+        children: richChildren(parseRichInline(inner)),
+      });
+    } else {
+      children.push(parseRichList(inner, tag === "ol" ? "ordered" : "unordered"));
+    }
+    lastIndex = blockRe.lastIndex;
+  }
+  if (matched) {
+    pushLooseParagraphs(children, html.slice(lastIndex));
+  } else {
+    pushLooseParagraphs(children, html);
+  }
+
+  if (!children.length) children.push(richParagraph([richText("")]));
+  return JSON.stringify({ type: "root", children });
+}
+
+/** Encode a CSV cell value to match the metafield definition's type. */
+export function encodeMetafieldValue(type, raw) {
+  const value = raw == null ? "" : String(raw);
+
+  if (type === "rich_text_field") return htmlToRichText(value);
+
+  if (type === "json") {
+    try {
+      JSON.parse(value);
+      return value; // already valid JSON — pass through
+    } catch {
+      return JSON.stringify(value); // wrap as a JSON string
+    }
+  }
+
+  if (typeof type === "string" && type.startsWith("list.")) {
+    try {
+      if (Array.isArray(JSON.parse(value))) return value; // already a JSON array
+    } catch {
+      // fall through to split-encoding
+    }
+    const items = value
+      .split("|")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return JSON.stringify(items);
+  }
+
+  return value;
+}
+
 /** Remove a leading UTF-8 BOM (U+FEFF) that often sticks to the first header. */
 export function stripBom(value) {
   if (typeof value !== "string") return value;

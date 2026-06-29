@@ -10,6 +10,7 @@
 // API schema with the Shopify dev MCP validator.
 
 import {
+  encodeMetafieldValue,
   fieldsForRow,
   metafieldsForRow,
   parsePrice,
@@ -266,7 +267,7 @@ async function processRow(admin, shop, mapping, row, options, rowIndex) {
             namespace: m.namespace,
             key: m.key,
             type: m.type,
-            value: m.value,
+            value: encodeMetafieldValue(m.type, m.value),
           })),
         });
         const mfErrors = set?.metafieldsSet?.userErrors ?? [];
