@@ -304,6 +304,9 @@ export function guessMapping(headers) {
       key === "quantity" ||
       key === "qty" ||
       key === "stock" ||
+      key === "stock_level" ||
+      key === "availability" ||
+      key === "available" ||
       key === "inventory_quantity" ||
       key === "stock_quantity"
     )
