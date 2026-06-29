@@ -1,0 +1,7 @@
+this is shopify app initial template, i want to make a admin page that goal is to import products from csv and create new products or update if already exist. it import csv like products1-50.csv then make mapping , csv columns heading on left side and right have selectable fields that have product all editable options, when mapping done then it create or update a products. 
+
+for categories , in csv is like this "Samsung > Galaxy A > Galaxy A22 5G" , except last one "Galaxy A22 5G", first two "Samsung", "Galaxy A" are collection, this values add on product collection, in case that collection is not present then make new collection then assign to create or updated products
+
+for tags, in csv it present in tab_tags columns, separated with "|" like this "Accu | Akku | Battery | Samsung", 
+
+for images, in csv the link is from another website, can it possible to first it download , import into shopify file then it assign to new or updated product  

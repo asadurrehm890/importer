@@ -13,6 +13,7 @@ import {
   fieldsForRow,
   metafieldsForRow,
   parsePrice,
+  parseQuantity,
   parseStatus,
   splitCategories,
   splitImages,
@@ -31,6 +32,13 @@ const PRODUCT_SET = `#graphql
     productSet(input: $input, synchronous: true) {
       product { id title handle status }
       userErrors { field message code }
+    }
+  }`;
+
+const PRIMARY_LOCATION = `#graphql
+  query PrimaryLocation {
+    locations(first: 1, query: "status:active") {
+      edges { node { id } }
     }
   }`;
 
@@ -80,6 +88,10 @@ function collectionCacheFor(shop) {
   return cache;
 }
 
+// In-memory primary-location cache (shop → location GID). Inventory quantities
+// must be set against a location; we use the store's first active one.
+const locationCaches = new Map();
+
 // Escape single quotes for use inside a Shopify search query string.
 function esc(value) {
   return String(value).replace(/'/g, "");
@@ -102,6 +114,20 @@ async function findProductIdBySku(admin, sku) {
   });
   const node = data?.productVariants?.edges?.[0]?.node;
   return node?.product?.id ?? null;
+}
+
+/** Resolve the store's primary (first active) location GID, cached per shop. */
+async function primaryLocationId(admin, shop) {
+  if (locationCaches.has(shop)) return locationCaches.get(shop);
+  let id = null;
+  try {
+    const data = await gql(admin, PRIMARY_LOCATION);
+    id = data?.locations?.edges?.[0]?.node?.id ?? null;
+  } catch {
+    id = null;
+  }
+  locationCaches.set(shop, id);
+  return id;
 }
 
 /** Find-or-create a custom collection by title, using the per-shop cache. */
@@ -148,6 +174,17 @@ function buildProductInput(fields, options, existingId) {
   if (price != null) variant.price = price;
   const compareAt = parsePrice(fields.compareAtPrice);
   if (compareAt != null) variant.compareAtPrice = compareAt;
+
+  // Inventory: only set when a quantity is mapped AND we resolved a location.
+  // Setting a quantity requires the item to be tracked. On updates Shopify only
+  // accepts quantities at locations where the variant is already stocked.
+  const quantity = parseQuantity(fields.inventoryQuantity);
+  if (quantity != null && options.locationId) {
+    variant.inventoryItem = { tracked: true };
+    variant.inventoryQuantities = [
+      { locationId: options.locationId, name: "available", quantity },
+    ];
+  }
 
   const input = {
     status,
@@ -278,10 +315,17 @@ async function processRow(admin, shop, mapping, row, options, rowIndex) {
  * Returns an array of per-row result records.
  */
 export async function runImportBatch(admin, shop, mapping, rows, options = {}) {
+  // Resolve the location once per batch, but only if a column maps to inventory.
+  const needsInventory = Object.values(mapping).includes("inventoryQuantity");
+  const locationId = needsInventory
+    ? await primaryLocationId(admin, shop)
+    : null;
+  const opts = { ...options, locationId };
+
   const results = [];
   for (const row of rows) {
     results.push(
-      await processRow(admin, shop, mapping, row.data, options, row.index),
+      await processRow(admin, shop, mapping, row.data, opts, row.index),
     );
   }
   return results;

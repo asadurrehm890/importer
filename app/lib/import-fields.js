@@ -32,6 +32,11 @@ export const SHOPIFY_FIELDS = [
   { value: "compareAtPrice", label: "Compare-at price", group: "Variant" },
   { value: "sku", label: "SKU — match key", group: "Variant" },
   { value: "barcode", label: "Barcode (EAN / UPC)", group: "Variant" },
+  {
+    value: "inventoryQuantity",
+    label: "Inventory quantity (available)",
+    group: "Variant",
+  },
 ];
 
 export const FIELD_VALUES = new Set(SHOPIFY_FIELDS.map((f) => f.value));
@@ -106,6 +111,15 @@ export function guessMapping(headers) {
       field = "collections";
     else if (key === "images" || key === "image" || key === "image_url")
       field = "images";
+    else if (
+      key === "inventory" ||
+      key === "quantity" ||
+      key === "qty" ||
+      key === "stock" ||
+      key === "inventory_quantity" ||
+      key === "stock_quantity"
+    )
+      field = "inventoryQuantity";
     else if (key === "tab_tags" || key === "tags") field = "tags";
     else if (key === "status") field = "status";
     else if (key === "handle" || key === "slug") field = "handle";
@@ -144,6 +158,19 @@ export function parsePrice(raw) {
   const num = parseFloat(s);
   if (Number.isNaN(num)) return null;
   return num.toFixed(2);
+}
+
+/**
+ * Parse an inventory quantity cell into a whole number.
+ * Strips currency/grouping characters ("1,250" → 1250). Returns null when no
+ * integer can be parsed so the variant's inventory is left untouched.
+ */
+export function parseQuantity(raw) {
+  if (raw == null) return null;
+  const s = String(raw).replace(/[^\d-]/g, "").trim();
+  if (!s || s === "-") return null;
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) ? n : null;
 }
 
 /** Split "Accu | Akku | Battery" into ["Accu","Akku","Battery"] (deduped). */
